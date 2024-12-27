@@ -25,14 +25,7 @@ MAKEARGS := $(strip \
 # Xcode 15+ and will abort a multi-platform build on earlier Xcode versions.
 .PHONY: all
 all:
-	@$(MAKE) macos
-	@$(MAKE) ios
-	@$(MAKE) iossim
-	@$(MAKE) maccat
-	@$(MAKE) tvos
-	@$(MAKE) tvossim
-#	@$(MAKE) visionos       # Requires Xcode 15+
-#	@$(MAKE) visionossim    # Requires Xcode 15+
+	@$(MAKE) maco
 
 .PHONY: all-debug
 all-debug:
