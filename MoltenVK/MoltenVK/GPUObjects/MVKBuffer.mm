@@ -185,6 +185,7 @@ id<MTLBuffer> MVKBuffer::getMTLBuffer() {
 			_mtlBuffer = [_deviceMemory->getMTLHeap() newBufferWithLength: getByteCount()
 																  options: _deviceMemory->getMTLResourceOptions()
 																   offset: _deviceMemoryOffset];	// retained
+			getDevice()->makeResident(_mtlBuffer);
 			propagateDebugName();
 			return _mtlBuffer;
 		} else {
@@ -202,6 +203,7 @@ id<MTLBuffer> MVKBuffer::getMTLBufferCache() {
 
 		_mtlBufferCache = [getMTLDevice() newBufferWithLength: getByteCount()
 													  options: MTLResourceStorageModeManaged];    // retained
+		getDevice()->makeResident(_mtlBufferCache);
         flushToDevice(_deviceMemoryOffset, _byteCount);
     }
 #endif
@@ -236,12 +238,16 @@ MVKBuffer::MVKBuffer(MVKDevice* device, const VkBufferCreateInfo* pCreateInfo) :
 
 void MVKBuffer::initExternalMemory(VkExternalMemoryHandleTypeFlags handleTypes) {
 	if ( !handleTypes ) { return; }
-	if (mvkIsOnlyAnyFlagEnabled(handleTypes, VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_KHR)) {
+	if (mvkIsOnlyAnyFlagEnabled(handleTypes, VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT)) {
 		_externalMemoryHandleTypes = handleTypes;
-		auto& xmProps = getPhysicalDevice()->getExternalBufferProperties(VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_KHR);
+		auto& xmProps = getPhysicalDevice()->getExternalBufferProperties(VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT);
+		_requiresDedicatedMemoryAllocation = _requiresDedicatedMemoryAllocation || mvkIsAnyFlagEnabled(xmProps.externalMemoryFeatures, VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT);
+	} else if (mvkIsOnlyAnyFlagEnabled(handleTypes, VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT)) {
+		_externalMemoryHandleTypes = handleTypes;
+		auto& xmProps = getPhysicalDevice()->getExternalBufferProperties(VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT);
 		_requiresDedicatedMemoryAllocation = _requiresDedicatedMemoryAllocation || mvkIsAnyFlagEnabled(xmProps.externalMemoryFeatures, VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT);
 	} else {
-		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCreateBuffer(): Only external memory handle type VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_KHR is supported."));
+		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCreateBuffer(): Only external memory handle type VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT and VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT are supported."));
 	}
 }
 
@@ -268,8 +274,10 @@ void MVKBuffer::destroy() {
 void MVKBuffer::detachMemory() {
 	if (_deviceMemory) { _deviceMemory->removeBuffer(this); }
 	_deviceMemory = nullptr;
+	if (_mtlBuffer) getDevice()->removeResidency(_mtlBuffer);
 	[_mtlBuffer release];
 	_mtlBuffer = nil;
+	if (_mtlBufferCache) getDevice()->removeResidency(_mtlBufferCache);
 	[_mtlBufferCache release];
 	_mtlBufferCache = nil;
 }
@@ -296,7 +304,7 @@ id<MTLTexture> MVKBufferView::getMTLTexture() {
         if ( mvkIsAnyFlagEnabled(_buffer->getUsage(), VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT) ) {
 			usage |= MTLTextureUsageShaderWrite;
 #if MVK_XCODE_15
-			if (getMetalFeatures().nativeTextureAtomics && (_mtlPixelFormat == MTLPixelFormatR32Sint || _mtlPixelFormat == MTLPixelFormatR32Uint || _mtlPixelFormat == MTLPixelFormatRG32Uint))
+			if (getMetalFeatures().nativeTextureAtomics && (_mtlPixelFormat == MTLPixelFormatR32Sint || _mtlPixelFormat == MTLPixelFormatR32Uint))
 				usage |= MTLTextureUsageShaderAtomic;
 #endif
         }
@@ -327,6 +335,7 @@ id<MTLTexture> MVKBufferView::getMTLTexture() {
 		_mtlTexture = [mtlBuff newTextureWithDescriptor: mtlTexDesc
 												 offset: mtlBuffOffset
 											bytesPerRow: _mtlBytesPerRow];
+		getDevice()->makeResident(_mtlTexture);
 		propagateDebugName();
     }
     return _mtlTexture;
@@ -390,6 +399,7 @@ void MVKBufferView::destroy() {
 
 // Potentially called twice, from destroy() and destructor, so ensure everything is nulled out.
 void MVKBufferView::detachMemory() {
+	if (_mtlTexture) getDevice()->removeResidency(_mtlTexture);
 	[_mtlTexture release];
 	_mtlTexture = nil;
 }

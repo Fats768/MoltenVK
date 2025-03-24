@@ -213,6 +213,9 @@ public:
 	/** Returns the supported time domains for calibration on this device. */
 	VkResult getCalibrateableTimeDomains(uint32_t* pTimeDomainCount, VkTimeDomainEXT* pTimeDomains);
 
+	/** Populates the specified structure with the tool properties of this device. */
+	VkResult getToolProperties(uint32_t* pToolCount, VkPhysicalDeviceToolProperties* pToolProperties);
+
 #pragma mark Surfaces
 
 	/**
@@ -336,37 +339,39 @@ public:
 	 * Returns a bit mask of all memory type indices. 
 	 * Each bit [0..31] in the returned bit mask indicates a distinct memory type.
 	 */
-	uint32_t getAllMemoryTypes() { return _allMemoryTypes; }
+	uint32_t getAllMemoryTypes() const { return _allMemoryTypes; }
 
 	/**
 	 * Returns a bit mask of all memory type indices that allow host visibility to the memory. 
 	 * Each bit [0..31] in the returned bit mask indicates a distinct memory type.
 	 */
-	uint32_t getHostVisibleMemoryTypes() { return _hostVisibleMemoryTypes; }
+	uint32_t getHostVisibleMemoryTypes() const { return _hostVisibleMemoryTypes; }
 
 	/**
 	 * Returns a bit mask of all memory type indices that are coherent between host and device.
 	 * Each bit [0..31] in the returned bit mask indicates a distinct memory type.
 	 */
-	uint32_t getHostCoherentMemoryTypes() { return _hostCoherentMemoryTypes; }
+	uint32_t getHostCoherentMemoryTypes() const { return _hostCoherentMemoryTypes; }
 
 	/**
 	 * Returns a bit mask of all memory type indices that do NOT allow host visibility to the memory.
 	 * Each bit [0..31] in the returned bit mask indicates a distinct memory type.
 	 */
-	uint32_t getPrivateMemoryTypes() { return _privateMemoryTypes; }
+	uint32_t getPrivateMemoryTypes() const { return _privateMemoryTypes; }
 
 	/**
 	 * Returns a bit mask of all memory type indices that are lazily allocated.
 	 * Each bit [0..31] in the returned bit mask indicates a distinct memory type.
 	 */
-	uint32_t getLazilyAllocatedMemoryTypes() { return _lazilyAllocatedMemoryTypes; }
+	uint32_t getLazilyAllocatedMemoryTypes() const { return _lazilyAllocatedMemoryTypes; }
 
 	/** Returns the external memory properties supported for buffers for the handle type. */
 	VkExternalMemoryProperties& getExternalBufferProperties(VkExternalMemoryHandleTypeFlagBits handleType);
 
 	/** Returns the external memory properties supported for images for the handle type. */
-	VkExternalMemoryProperties& getExternalImageProperties(VkExternalMemoryHandleTypeFlagBits handleType);
+	VkExternalMemoryProperties& getExternalImageProperties(VkFormat format, VkExternalMemoryHandleTypeFlagBits handleType);
+
+	uint32_t getExternalResourceMemoryTypeBits(VkExternalMemoryHandleTypeFlagBits handleType, const void* handle) const;
 
 	/** Returns the amount of memory currently consumed by the GPU. */
 	size_t getCurrentAllocatedSize();
@@ -464,6 +469,7 @@ protected:
 	VkExternalMemoryProperties _hostPointerExternalMemoryProperties;
 	VkExternalMemoryProperties _mtlBufferExternalMemoryProperties;
 	VkExternalMemoryProperties _mtlTextureExternalMemoryProperties;
+	VkExternalMemoryProperties _mtlTextureHeapExternalMemoryProperties;
 	id<MTLCounterSet> _timestampMTLCounterSet;
 	MVKSemaphoreStyle _vkSemaphoreStyle;
 	MTLTimestamp _prevCPUTimestamp = 0;
@@ -491,6 +497,10 @@ typedef struct MVKMTLBlitEncoder {
 	id<MTLCommandBuffer> mtlCmdBuffer = nil;
 } MVKMTLBlitEncoder;
 
+// Arbitrary, after that many barriers with a given source pipeline stage we will wrap around
+// and potentially introduce extra synchronization on previous invocations of the same stage.
+static const uint32_t kMVKBarrierFenceCount = 64;
+
 /** Represents a Vulkan logical GPU device, associated with a physical device. */
 class MVKDevice : public MVKDispatchableVulkanAPIObject {
 
@@ -504,6 +514,8 @@ public:
 
 	/** Returns a pointer to the Vulkan instance. */
 	MVKInstance* getInstance() override { return _physicalDevice->_mvkInstance; }
+
+	const MVKPhysicalDevice* getPhysicalDevice() const { return _physicalDevice; }
 
 	/** Returns the name of this device. */
 	const char* getName() { return _physicalDevice->_properties.deviceName; }
@@ -819,6 +831,49 @@ public:
 	/** Returns the Metal objects underpinning the Vulkan objects indicated in the pNext chain of pMetalObjectsInfo. */
 	void getMetalObjects(VkExportMetalObjectsInfoEXT* pMetalObjectsInfo);
 
+	void* getResourceIdFromHandle(const VkMemoryGetMetalHandleInfoEXT* pGetMetalHandleInfo) const;
+
+#if !MVK_XCODE_16
+	void makeResident(id allocation) {}
+#else
+	void makeResident(id<MTLAllocation> allocation) {
+		@synchronized(_residencySet) {
+			[_residencySet addAllocation: allocation];
+			[_residencySet commit];
+		}
+	}
+#endif
+
+#if !MVK_XCODE_16
+	void removeResidency(id allocation) {}
+#else
+	void removeResidency(id<MTLAllocation> allocation) {
+		@synchronized(_residencySet) {
+			[_residencySet removeAllocation:allocation];
+			[_residencySet commit];
+		}
+	}
+#endif
+
+	void addResidencySet(id<MTLCommandQueue> queue) {
+#if MVK_XCODE_16
+		if (_residencySet) [queue addResidencySet:_residencySet];
+#endif
+	}
+
+	void removeResidencySet(id<MTLCommandQueue> queue) {
+#if MVK_XCODE_16
+		if (_residencySet) [queue removeResidencySet:_residencySet];
+#endif
+	}
+
+	bool hasResidencySet() {
+#if MVK_XCODE_16
+		return _residencySet != nil;
+#else
+		return false;
+#endif
+	}
 
 #pragma mark Construction
 
@@ -840,6 +895,16 @@ public:
     static inline MVKDevice* getMVKDevice(VkDevice vkDevice) {
         return (MVKDevice*)getDispatchableObject(vkDevice);
     }
+
+#pragma mark Barriers
+
+	/** Returns a Metal fence to update for the given barrier stage. */
+	id<MTLFence> getBarrierStageFence(id<MTLCommandBuffer> mtlCommandBuffer, MVKBarrierStage stage);
+
+	/** Returns a Metal fence by its stage and slot index. */
+	id<MTLFence> getFence(MVKBarrierStage stage, int index) {
+		return _barrierFences[stage][index];
+	}
 
 protected:
 	friend class MVKDeviceTrackingMixin;
@@ -880,6 +945,8 @@ protected:
 	VkPhysicalDevice##structName##Features##extnSfx _enabled##structName##Features;
 #include "MVKDeviceFeatureStructs.def"
 
+	id<MTLFence> _barrierFences[kMVKBarrierStageCount][kMVKBarrierFenceCount];
+
 	MVKPerformanceStatistics _performanceStats;
     MVKCommandResourceFactory* _commandResourceFactory = nullptr;
 	MVKSmallVector<MVKSmallVector<MVKQueue*, kMVKQueueCountPerQueueFamily>, kMVKQueueFamilyCount> _queuesByQueueFamilyIndex;
@@ -897,6 +964,9 @@ protected:
     id<MTLBuffer> _globalVisibilityResultMTLBuffer = nil;
 	id<MTLSamplerState> _defaultMTLSamplerState = nil;
 	id<MTLBuffer> _dummyBlitMTLBuffer = nil;
+#if MVK_XCODE_16
+	id<MTLResidencySet> _residencySet = nil;
+#endif
     uint32_t _globalVisibilityQueryCount = 0;
 	int _capturePipeFileDesc = -1;
 	bool _isPerformanceTracking = false;

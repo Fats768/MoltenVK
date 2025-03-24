@@ -429,6 +429,11 @@ void MVKPhysicalDevice::getFeatures(VkPhysicalDeviceFeatures2* features) {
 				vmmFeatures->vulkanMemoryModelAvailabilityVisibilityChains = supportedFeats12.vulkanMemoryModelAvailabilityVisibilityChains;
 				break;
 			}
+			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ZERO_INITIALIZE_WORKGROUP_MEMORY_FEATURES: {
+				auto* zeroInitWorkgroupMemFeatures = (VkPhysicalDeviceZeroInitializeWorkgroupMemoryFeatures*)next;
+				zeroInitWorkgroupMemFeatures->shaderZeroInitializeWorkgroupMemory = true;
+				break;
+			}
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR: {
 				auto* barycentricFeatures = (VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR*)next;
 				barycentricFeatures->fragmentShaderBarycentric = true;
@@ -441,7 +446,7 @@ void MVKPhysicalDevice::getFeatures(VkPhysicalDeviceFeatures2* features) {
 				portabilityFeatures->imageViewFormatReinterpretation = true;
 				portabilityFeatures->imageViewFormatSwizzle = (_metalFeatures.nativeTextureSwizzle ||
 															   getMVKConfig().fullImageViewSwizzle);
-				portabilityFeatures->imageView2DOn3DImage = false;
+				portabilityFeatures->imageView2DOn3DImage = getMVKConfig().useMTLHeap;
 				portabilityFeatures->multisampleArrayImage = _metalFeatures.multisampleArrayTextures;
 				portabilityFeatures->mutableComparisonSamplers = _metalFeatures.depthSampleCompare;
 				portabilityFeatures->pointPolygons = false;
@@ -459,6 +464,11 @@ void MVKPhysicalDevice::getFeatures(VkPhysicalDeviceFeatures2* features) {
 				shaderIntDotFeatures->shaderIntegerDotProduct = true;
 				break;
 			}
+			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_TERMINATE_INVOCATION_FEATURES_KHR: {
+				auto* terminateFeatures = (VkPhysicalDeviceShaderTerminateInvocationFeaturesKHR*)next;
+				terminateFeatures->shaderTerminateInvocation = true;
+				break;
+			}
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT: {
 				auto* formatFeatures = (VkPhysicalDevice4444FormatsFeaturesEXT*)next;
 				bool canSupport4444 = _metalFeatures.tileBasedDeferredRendering &&
@@ -466,6 +476,11 @@ void MVKPhysicalDevice::getFeatures(VkPhysicalDeviceFeatures2* features) {
 									   getMVKConfig().fullImageViewSwizzle);
 				formatFeatures->formatA4R4G4B4 = canSupport4444;
 				formatFeatures->formatA4B4G4R4 = canSupport4444;
+				break;
+			}
+			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT: {
+				auto* depthFeatures = (VkPhysicalDeviceDepthClipControlFeaturesEXT*)next;
+				depthFeatures->depthClipControl = true;
 				break;
 			}
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT: {
@@ -525,6 +540,14 @@ void MVKPhysicalDevice::getFeatures(VkPhysicalDeviceFeatures2* features) {
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT: {
 				auto* hostImageCopyFeatures = (VkPhysicalDeviceHostImageCopyFeaturesEXT*)next;
 				hostImageCopyFeatures->hostImageCopy = true;
+				break;
+			}
+			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_2D_VIEW_OF_3D_FEATURES_EXT: {
+				if (getMVKConfig().useMTLHeap) {
+					auto* extFeatures = (VkPhysicalDeviceImage2DViewOf3DFeaturesEXT*)next;
+					extFeatures->image2DViewOf3D = true;
+					extFeatures->sampler2DViewOf3D = true;
+				}
 				break;
 			}
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT: {
@@ -1312,7 +1335,7 @@ VkResult MVKPhysicalDevice::getImageFormatProperties(const VkPhysicalDeviceImage
 				for (auto* nextProps = (VkBaseOutStructure*)pImageFormatProperties->pNext; nextProps; nextProps = nextProps->pNext) {
 					if (nextProps->sType == VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES) {
 						auto* pExtImgFmtProps = (VkExternalImageFormatProperties*)nextProps;
-						pExtImgFmtProps->externalMemoryProperties = getExternalImageProperties(pExtImgFmtInfo->handleType);
+						pExtImgFmtProps->externalMemoryProperties = getExternalImageProperties(pImageFormatInfo->format, pExtImgFmtInfo->handleType);
 					}
 				}
 				break;
@@ -1370,23 +1393,57 @@ VkExternalMemoryProperties& MVKPhysicalDevice::getExternalBufferProperties(VkExt
 		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
 		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_MAPPED_FOREIGN_MEMORY_BIT_EXT:
 			return _hostPointerExternalMemoryProperties;
-		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_KHR:
+		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT:
 			return _mtlBufferExternalMemoryProperties;
 		default:
 			return _emptyExtMemProps;
 	}
 }
 
-VkExternalMemoryProperties& MVKPhysicalDevice::getExternalImageProperties(VkExternalMemoryHandleTypeFlagBits handleType) {
+VkExternalMemoryProperties& MVKPhysicalDevice::getExternalImageProperties(VkFormat format, VkExternalMemoryHandleTypeFlagBits handleType) {
 	switch (handleType) {
 		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
 		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_MAPPED_FOREIGN_MEMORY_BIT_EXT:
 			return _hostPointerExternalMemoryProperties;
-		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_KHR:
+		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT:
+			// We cannot export images that have no Metal counterparts. This is because we are emulating them via multiple MTLTextures
+			// and we would require to export multiple MTLTextures. We let them export them as a heap whenever possible.
+			if (_pixelFormats.getChromaSubsamplingPlaneCount(format) > 1u)
+				return _mtlTextureHeapExternalMemoryProperties;
 			return _mtlTextureExternalMemoryProperties;
+		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT:
+			return _mtlTextureHeapExternalMemoryProperties;
 		default:
 			return _emptyExtMemProps;
 	}
+}
+
+uint32_t MVKPhysicalDevice::getExternalResourceMemoryTypeBits(VkExternalMemoryHandleTypeFlagBits handleType,
+															  const void* handle) const {
+	// MTLBuffer and MTLTextures are resources. MTLHeap is not according to Metal
+	const bool isResource = handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+	const MTLStorageMode storageMode = isResource ? ((id<MTLResource>)handle).storageMode : ((id<MTLHeap>)handle).storageMode;
+	uint32_t memoryTypeBits = 0u;
+	switch (storageMode) {
+	case MTLStorageModeShared:
+		memoryTypeBits = _hostCoherentMemoryTypes;
+		break;
+#if !MVK_IOS && !MVK_TVOS
+	case MTLStorageModeManaged:
+		memoryTypeBits = _hostVisibleMemoryTypes;
+		break;
+#endif
+	case MTLStorageModePrivate:
+		memoryTypeBits = _privateMemoryTypes;
+		break;
+	case MTLStorageModeMemoryless:
+		memoryTypeBits = _lazilyAllocatedMemoryTypes;
+		break;
+	default:
+		// This should never be reached, but just to be future-proof
+		break;
+	};
+	return memoryTypeBits;
 }
 
 static const VkExternalFenceProperties _emptyExtFenceProps = {VK_STRUCTURE_TYPE_EXTERNAL_FENCE_PROPERTIES, nullptr, 0, 0, 0};
@@ -1420,6 +1477,12 @@ VkResult MVKPhysicalDevice::getCalibrateableTimeDomains(uint32_t* pTimeDomainCou
 	std::copy_n(domains, min(*pTimeDomainCount, kMaxTimeDomains), pTimeDomains);
 	if (*pTimeDomainCount < kMaxTimeDomains) { return VK_INCOMPLETE; }
 	*pTimeDomainCount = kMaxTimeDomains;
+	return VK_SUCCESS;
+}
+
+VkResult MVKPhysicalDevice::getToolProperties(uint32_t* pToolCount, VkPhysicalDeviceToolProperties* pToolProperties) {
+	// Metal does not currently have a standard way to detect attached tools, so report nothing.
+	*pToolCount = 0;
 	return VK_SUCCESS;
 }
 
@@ -2501,6 +2564,9 @@ void MVKPhysicalDevice::initMetalFeatures() {
 	}
 #endif
 
+#if MVK_XCODE_16 && MVK_MACOS
+    _metalFeatures.residencySets = mvkOSVersionIsAtLeast(15) && supportsMTLGPUFamily(Apple6);
+#endif
 }
 
 // Initializes the physical device features of this instance.
@@ -3328,15 +3394,23 @@ void MVKPhysicalDevice::initExternalMemoryProperties() {
 	// Buffers
 	_mtlBufferExternalMemoryProperties.externalMemoryFeatures = (VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
 																 VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT);
-	_mtlBufferExternalMemoryProperties.exportFromImportedHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_KHR;
-	_mtlBufferExternalMemoryProperties.compatibleHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_KHR;
+	_mtlBufferExternalMemoryProperties.exportFromImportedHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT;
+	_mtlBufferExternalMemoryProperties.compatibleHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT;
 
 	// Images
 	_mtlTextureExternalMemoryProperties.externalMemoryFeatures = (VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
 																  VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT |
 																  VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT);
-	_mtlTextureExternalMemoryProperties.exportFromImportedHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_KHR;
-	_mtlTextureExternalMemoryProperties.compatibleHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_KHR;
+	_mtlTextureExternalMemoryProperties.exportFromImportedHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT;
+	_mtlTextureExternalMemoryProperties.compatibleHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT;
+
+	if (_metalFeatures.placementHeaps) {
+		_mtlTextureHeapExternalMemoryProperties = _mtlTextureExternalMemoryProperties;
+		_mtlTextureHeapExternalMemoryProperties.exportFromImportedHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+		_mtlTextureHeapExternalMemoryProperties.compatibleHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+	} else {
+		_mtlTextureHeapExternalMemoryProperties = _emptyExtMemProps;
+	}
 }
 
 void MVKPhysicalDevice::initExtensions() {
@@ -3372,6 +3446,9 @@ void MVKPhysicalDevice::initExtensions() {
 	}
 	if (!_metalFeatures.arrayOfTextures || !_metalFeatures.arrayOfSamplers) {
 		pWritableExtns->vk_EXT_descriptor_indexing.enabled = false;
+	}
+	if (!getMVKConfig().useMTLHeap) {
+		pWritableExtns->vk_EXT_image_2d_view_of_3d.enabled = false;
 	}
     
     // The relevant functions are not available if not built with Xcode 14.
@@ -4789,8 +4866,37 @@ void MVKDevice::getMetalObjects(VkExportMetalObjectsInfoEXT* pMetalObjectsInfo) 
 	}
 }
 
+void* MVKDevice::getResourceIdFromHandle(const VkMemoryGetMetalHandleInfoEXT* pGetMetalHandleInfo) const
+{
+	void* handle = nil;
+	MVKDeviceMemory* memory = (MVKDeviceMemory*)pGetMetalHandleInfo->memory;
+	switch (pGetMetalHandleInfo->handleType) {
+		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT:
+			handle = memory->getMTLBuffer();
+			break;
+		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT:
+			handle = memory->getMTLTexture();
+			break;
+		case VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT:
+			handle = memory->getMTLHeap();
+		default:
+			break;
+	}
+	return handle;
+}
+
 
 #pragma mark Construction
+
+static NSString *mvkBarrierStageName(MVKBarrierStage stage) {
+	switch (stage) {
+	case kMVKBarrierStageVertex:   return @"Vertex";
+	case kMVKBarrierStageFragment: return @"Fragment";
+	case kMVKBarrierStageCompute:  return @"Compute";
+	case kMVKBarrierStageCopy:     return @"Copy";
+	default:                       return [NSString stringWithFormat:@"Invalid (%d)", stage];
+	}
+}
 
 MVKDevice::MVKDevice(MVKPhysicalDevice* physicalDevice, const VkDeviceCreateInfo* pCreateInfo) : _enabledExtensions(this) {
 
@@ -4807,6 +4913,17 @@ MVKDevice::MVKDevice(MVKPhysicalDevice* physicalDevice, const VkDeviceCreateInfo
 	enableFeatures(pCreateInfo);
 	initQueues(pCreateInfo);
 	reservePrivateData(pCreateInfo);
+
+	// Initialize fences for execution barriers
+	@autoreleasepool {
+		for (int stage = 0; stage < kMVKBarrierStageCount; ++stage) {
+			for (int index = 0; index < kMVKBarrierFenceCount; ++index) {
+				auto &fence = _barrierFences[stage][index];
+				fence = [_physicalDevice->getMTLDevice() newFence];
+				[fence setLabel:[NSString stringWithFormat:@"%@ Fence %d", mvkBarrierStageName((MVKBarrierStage)stage), index]];
+			}
+		}
+	}
 
 #if MVK_MACOS
 	// After enableExtensions
@@ -5110,6 +5227,23 @@ void MVKDevice::enableExtensions(const VkDeviceCreateInfo* pCreateInfo) {
 
 // Create the command queues
 void MVKDevice::initQueues(const VkDeviceCreateInfo* pCreateInfo) {
+#if MVK_XCODE_16
+	if (_physicalDevice->_isUsingMetalArgumentBuffers && _physicalDevice->_metalFeatures.residencySets) {
+		MTLResidencySetDescriptor *setDescriptor;
+		setDescriptor = [MTLResidencySetDescriptor new];
+		setDescriptor.label = @"Primary residency set";
+		setDescriptor.initialCapacity = 256;
+
+		NSError *error;
+		_residencySet = [_physicalDevice->getMTLDevice() newResidencySetWithDescriptor:setDescriptor
+																				 error:&error];
+		if (error) {
+			reportMessage(MVK_CONFIG_LOG_LEVEL_ERROR, "Error allocating residency set: %s", error.description.UTF8String);
+		}
+		[setDescriptor release];
+	}
+#endif
+
 	auto qFams = _physicalDevice->getQueueFamilies();
 	uint32_t qrCnt = pCreateInfo->queueCreateInfoCount;
 	for (uint32_t qrIdx = 0; qrIdx < qrCnt; qrIdx++) {
@@ -5173,6 +5307,11 @@ MVKDevice::~MVKDevice() {
 
 	if (_commandResourceFactory) { _commandResourceFactory->destroy(); }
 
+	for (auto &fences: _barrierFences) for (auto fence: fences) [fence release];
+
+#if MVK_XCODE_16
+	[_residencySet release];
+#endif
     [_globalVisibilityResultMTLBuffer release];
 	[_defaultMTLSamplerState release];
 	[_dummyBlitMTLBuffer release];

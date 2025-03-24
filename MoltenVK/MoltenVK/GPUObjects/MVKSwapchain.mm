@@ -358,13 +358,14 @@ void MVKSwapchain::setHDRMetadataEXT(const VkHdrMetadataEXT& metadata) {
 	lightLevel.max_pic_average_light_level = OSSwapHostToBigInt16((uint16_t)metadata.maxFrameAverageLightLevel);
 	NSData* colorVolData = [[NSData alloc] initWithBytes: &colorVol length: sizeof(colorVol)];
 	NSData* lightLevelData = [[NSData alloc] initWithBytes: &lightLevel length: sizeof(lightLevel)];
-	CAEDRMetadata* caMetadata = [CAEDRMetadata HDR10MetadataWithDisplayInfo: colorVolData
-																contentInfo: lightLevelData
-														 opticalOutputScale: 1];
-	auto* mtlLayer = getCAMetalLayer();
-	mtlLayer.EDRMetadata = caMetadata;
-	mtlLayer.wantsExtendedDynamicRangeContent = YES;
-	[caMetadata release];
+    @autoreleasepool {
+        CAEDRMetadata* caMetadata = [CAEDRMetadata HDR10MetadataWithDisplayInfo: colorVolData
+                                                                    contentInfo: lightLevelData
+                                                             opticalOutputScale: 1];
+        auto* mtlLayer = getCAMetalLayer();
+        mtlLayer.EDRMetadata = caMetadata;
+        mtlLayer.wantsExtendedDynamicRangeContent = YES;
+    }
 	[colorVolData release];
 	[lightLevelData release];
 #endif
@@ -482,7 +483,8 @@ void MVKSwapchain::initCAMetalLayer(const VkSwapchainCreateInfoKHR* pCreateInfo,
 	mtlLayer.framebufferOnly = !mvkIsAnyFlagEnabled(pCreateInfo->imageUsage, (VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
 																			  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
 																			  VK_IMAGE_USAGE_SAMPLED_BIT |
-																			  VK_IMAGE_USAGE_STORAGE_BIT));
+																			  VK_IMAGE_USAGE_STORAGE_BIT)) &&
+								!mvkAreAllFlagsEnabled(pCreateInfo->flags, VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR);
 
 	// Because of a regression in Metal, the most recent one or two presentations may not
 	// complete and call back. Changing the CAMetalLayer drawableSize will force any incomplete
